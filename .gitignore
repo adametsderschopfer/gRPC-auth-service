@@ -1,0 +1,3 @@
+/storage/*.db
+/config/*.yaml
+/config/*.yml
