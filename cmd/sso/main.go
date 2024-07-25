@@ -6,6 +6,8 @@ import (
 	"github.com/adametsderschopfer/gRPC-auth-service/internal/lib/logger/handlers/slogpretty"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -17,14 +19,15 @@ func main() {
 
 	// TODO: Refactor cfg.sqlite - create abstraction
 	application := app.New(log, cfg.GRPC.Port, cfg.SQLite.StoragePath, cfg.TokenTTL)
-	application.GRPCSrv.MustRun()
+	go application.GRPCSrv.MustRun()
 
-	/*
-		TODO:
-			- Запустить grpc приложение
-	*/
+	// Graceful shutdown
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 
-	log.Error("Server stopped")
+	<-stop
+	application.GRPCSrv.Stop()
+	log.Error("Application stopped")
 }
 
 func setupLogger(env string) *slog.Logger {

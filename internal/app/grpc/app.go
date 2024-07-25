@@ -1,55 +1,100 @@
 package grpcapp
 
 import (
+	"context"
 	"fmt"
 	authgrpc "github.com/adametsderschopfer/gRPC-auth-service/internal/grpc/auth"
-	"google.golang.org/grpc"
 	"log/slog"
 	"net"
+
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/logging"
+	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/recovery"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type App struct {
 	log        *slog.Logger
-	GRPCServer *grpc.Server
+	gRPCServer *grpc.Server
 	port       int
 }
 
-func (a *App) Stop() {
-	const op = "grpcapp.Stop"
-	log := a.log.With(slog.String("op", op))
-	log.Info("Stopping gRPC server", slog.Int("port", a.port))
+// New creates new gRPC server app.
+func New(
+	log *slog.Logger,
+	authService authgrpc.Auth,
+	port int,
+) *App {
+	loggingOpts := []logging.Option{
+		logging.WithLogOnEvents(
+			//logging.StartCall, logging.FinishCall,
+			logging.PayloadReceived, logging.PayloadSent,
+		),
+		// Add any other option (check functions starting with logging.With).
+	}
 
-	a.GRPCServer.Stop()
+	recoveryOpts := []recovery.Option{
+		recovery.WithRecoveryHandler(func(p interface{}) (err error) {
+			log.Error("Recovered from panic", slog.Any("panic", p))
+
+			return status.Errorf(codes.Internal, "internal error")
+		}),
+	}
+
+	gRPCServer := grpc.NewServer(grpc.ChainUnaryInterceptor(
+		recovery.UnaryServerInterceptor(recoveryOpts...),
+		logging.UnaryServerInterceptor(InterceptorLogger(log), loggingOpts...),
+	))
+
+	authgrpc.Register(gRPCServer, authService)
+
+	return &App{
+		log:        log,
+		gRPCServer: gRPCServer,
+		port:       port,
+	}
 }
 
+// InterceptorLogger adapts slog logger to interceptor logger.
+// This code is simple enough to be copied and not imported.
+func InterceptorLogger(l *slog.Logger) logging.Logger {
+	return logging.LoggerFunc(func(ctx context.Context, lvl logging.Level, msg string, fields ...any) {
+		l.Log(ctx, slog.Level(lvl), msg, fields...)
+	})
+}
+
+// MustRun runs gRPC server and panics if any error occurs.
 func (a *App) MustRun() {
 	if err := a.Run(); err != nil {
 		panic(err)
 	}
 }
 
+// Run runs gRPC server.
 func (a *App) Run() error {
 	const op = "grpcapp.Run"
-	log := a.log.With(slog.String("op", op))
 
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", a.port))
 	if err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
 
-	log.Info("gRPC Server is running", slog.String("address", l.Addr().String()))
+	a.log.Info("grpc server started", slog.String("addr", l.Addr().String()))
 
-	if err := a.GRPCServer.Serve(l); err != nil {
+	if err := a.gRPCServer.Serve(l); err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
 
 	return nil
 }
 
-func NewApp(log *slog.Logger, port int) *App {
-	gRPCServer := grpc.NewServer()
+// Stop stops gRPC server.
+func (a *App) Stop() {
+	const op = "grpcapp.Stop"
 
-	authgrpc.Register(gRPCServer)
+	a.log.With(slog.String("op", op)).
+		Info("stopping gRPC server", slog.Int("port", a.port))
 
-	return &App{log: log, GRPCServer: gRPCServer, port: port}
+	a.gRPCServer.GracefulStop()
 }
